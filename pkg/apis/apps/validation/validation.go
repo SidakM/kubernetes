@@ -18,6 +18,7 @@ package validation
 
 import (
 	"fmt"
+	"k8s.io/kubernetes/pkg/features"
 	"strconv"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/kubernetes/pkg/apis/apps"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	apivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
@@ -154,7 +156,8 @@ func ValidateStatefulSetUpdate(statefulSet, oldStatefulSet *apps.StatefulSet) fi
 	statefulSet.Spec.UpdateStrategy = oldStatefulSet.Spec.UpdateStrategy
 
 	restoreVolumeClaimTemplates := make([]api.PersistentVolumeClaim, len(statefulSet.Spec.VolumeClaimTemplates))
-	if len(oldStatefulSet.Spec.VolumeClaimTemplates) == len(statefulSet.Spec.VolumeClaimTemplates) {
+	volumeExpansionEnabled := utilfeature.DefaultFeatureGate.Enabled(features.ExpandPersistentVolumes)
+	if volumeExpansionEnabled && len(oldStatefulSet.Spec.VolumeClaimTemplates) == len(statefulSet.Spec.VolumeClaimTemplates) {
 		for index, oldVolumeClaimTemplate := range oldStatefulSet.Spec.VolumeClaimTemplates {
 			oldStorageRequest := oldVolumeClaimTemplate.Spec.Resources.Requests[api.ResourceStorage]
 			newStorageRequest := statefulSet.Spec.VolumeClaimTemplates[index].Spec.Resources.Requests[api.ResourceStorage]
@@ -168,12 +171,21 @@ func ValidateStatefulSetUpdate(statefulSet, oldStatefulSet *apps.StatefulSet) fi
 	}
 
 	if !apiequality.Semantic.DeepEqual(statefulSet.Spec, oldStatefulSet.Spec) {
-		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec"), "updates to statefulset spec for fields other than 'replicas', 'template' ,'updateStrategy' and 'volumeClaimTemplate.Spec.Resources.Requests[storage]' are forbidden"))
+		var errMsg string
+		if volumeExpansionEnabled {
+			errMsg = "updates to statefulset spec for fields other than 'replicas', 'template', 'updateStrategy' and 'volumeClaimTemplate.Spec.Resources.Requests[storage]' are forbidden"
+		} else {
+			errMsg = "updates to statefulset spec for fields other than 'replicas', 'template' and 'updateStrategy' are forbidden"
+		}
+
+		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec"), errMsg))
 	}
 	statefulSet.Spec.Replicas = restoreReplicas
 	statefulSet.Spec.Template = restoreTemplate
 	statefulSet.Spec.UpdateStrategy = restoreStrategy
-	statefulSet.Spec.VolumeClaimTemplates = restoreVolumeClaimTemplates
+	if volumeExpansionEnabled {
+		statefulSet.Spec.VolumeClaimTemplates = restoreVolumeClaimTemplates
+	}
 
 	allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(statefulSet.Spec.Replicas), field.NewPath("spec", "replicas"))...)
 	return allErrs
